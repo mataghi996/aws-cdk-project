@@ -6,3 +6,12 @@ node_modules
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+
+# AWS credentials and environment files
+.env
+.env.*
+*.pem
+*.key
+
+# macOS
+.DS_Store
