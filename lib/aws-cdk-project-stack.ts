@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 
 export class AwsCdkProjectStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -65,6 +66,47 @@ export class AwsCdkProjectStack extends cdk.Stack {
       ec2.Port.tcp(5432),
       'Allow PostgreSQL only from EC2'
     );
+
+     // Amazon Linux 2023
+const machineImage = ec2.MachineImage.latestAmazonLinux2023();
+
+// User Data - Install Apache Web Server
+const userData = ec2.UserData.forLinux();
+
+userData.addCommands(
+  'dnf update -y',
+  'dnf install -y httpd',
+  'systemctl start httpd',
+  'systemctl enable httpd',
+  'echo "Hello from AWS CDK Auto Scaling" > /var/www/html/index.html',
+  'echo "OK" > /var/www/html/health'
+);
+
+// EC2 Launch Template
+const launchTemplate = new ec2.LaunchTemplate(this, 'MyLaunchTemplate', {
+  launchTemplateName: 'DevOpsLaunchTemplate',
+  instanceType: new ec2.InstanceType('t3.micro'),
+  machineImage: machineImage,
+  securityGroup: ec2SG,
+  userData: userData,
+});
+
+// Auto Scaling Group
+const asg = new autoscaling.AutoScalingGroup(this, 'MyAutoScalingGroup', {
+  vpc,
+  vpcSubnets: {
+    subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+  },
+  launchTemplate: launchTemplate,
+  minCapacity: 1,
+  desiredCapacity: 2,
+  maxCapacity: 4,
+});
+
+// CPU Target Tracking Scaling Policy
+asg.scaleOnCpuUtilization('CpuScalingPolicy', {
+  targetUtilizationPercent: 50,
+});
 
     // CloudFormation Outputs
     new cdk.CfnOutput(this, 'VpcId', {
