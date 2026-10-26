@@ -2,127 +2,126 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import * as rds from 'aws-cdk-lib/aws-rds';
 
 export class AwsCdkProjectStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Create VPC
-    const vpc = new ec2.Vpc(this, 'MyVPC', {
-      vpcName: 'DevOpsVPC',
+    const vpc = new ec2.Vpc(this, 'VPC', {
       ipAddresses: ec2.IpAddresses.cidr('10.20.0.0/16'),
       maxAzs: 2,
       natGateways: 1,
-
       subnetConfiguration: [
         {
-          name: 'PublicSubnet',
+          name: 'Public',
           subnetType: ec2.SubnetType.PUBLIC,
           cidrMask: 24,
         },
         {
-          name: 'PrivateSubnet',
+          name: 'Private',
           subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
           cidrMask: 24,
         },
       ],
     });
 
-    // ALB Security Group
-    const albSG = new ec2.SecurityGroup(this, 'ALBSecurityGroup', {
+
+    const albSG = new ec2.SecurityGroup(this, 'ALBSG', {
       vpc,
-      description: 'Security Group for Application Load Balancer',
-      allowAllOutbound: true,
     });
 
     albSG.addIngressRule(
       ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(80),
-      'Allow HTTP from internet'
+      ec2.Port.tcp(80)
     );
 
-    // EC2 Security Group
-    const ec2SG = new ec2.SecurityGroup(this, 'EC2SecurityGroup', {
+    const ec2SG = new ec2.SecurityGroup(this, 'EC2SG', {
       vpc,
-      description: 'Security Group for EC2 instances',
-      allowAllOutbound: true,
     });
 
     ec2SG.addIngressRule(
       albSG,
-      ec2.Port.tcp(80),
-      'Allow HTTP only from ALB'
+      ec2.Port.tcp(80)
     );
 
-    // RDS Security Group
-    const rdsSG = new ec2.SecurityGroup(this, 'RDSSecurityGroup', {
+    const rdsSG = new ec2.SecurityGroup(this, 'RDSSG', {
       vpc,
-      description: 'Security Group for RDS PostgreSQL',
       allowAllOutbound: false,
     });
 
     rdsSG.addIngressRule(
       ec2SG,
-      ec2.Port.tcp(5432),
-      'Allow PostgreSQL only from EC2'
+      ec2.Port.tcp(5432)
     );
 
-     // Amazon Linux 2023
-const machineImage = ec2.MachineImage.latestAmazonLinux2023();
 
-// User Data - Install Apache Web Server
-const userData = ec2.UserData.forLinux();
-
-userData.addCommands(
-  'dnf update -y',
-  'dnf install -y httpd',
-  'systemctl start httpd',
-  'systemctl enable httpd',
-  'echo "Hello from AWS CDK Auto Scaling" > /var/www/html/index.html',
-  'echo "OK" > /var/www/html/health'
-);
-
-// EC2 Launch Template
-const launchTemplate = new ec2.LaunchTemplate(this, 'MyLaunchTemplate', {
-  launchTemplateName: 'DevOpsLaunchTemplate',
-  instanceType: new ec2.InstanceType('t3.micro'),
-  machineImage: machineImage,
-  securityGroup: ec2SG,
-  userData: userData,
-});
-
-// Auto Scaling Group
-const asg = new autoscaling.AutoScalingGroup(this, 'MyAutoScalingGroup', {
-  vpc,
-  vpcSubnets: {
-    subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
-  },
-  launchTemplate: launchTemplate,
-  minCapacity: 1,
-  desiredCapacity: 2,
-  maxCapacity: 4,
-});
-
-// CPU Target Tracking Scaling Policy
-asg.scaleOnCpuUtilization('CpuScalingPolicy', {
-  targetUtilizationPercent: 50,
-});
-
-    // CloudFormation Outputs
-    new cdk.CfnOutput(this, 'VpcId', {
-      value: vpc.vpcId,
+    const launchTemplate = new ec2.LaunchTemplate(this, 'LaunchTemplate', {
+      instanceType: new ec2.InstanceType(
+        this.node.tryGetContext('instanceType') || 't3.micro'
+      ),
+      machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+      securityGroup: ec2SG,
     });
 
-    new cdk.CfnOutput(this, 'ALBSecurityGroupId', {
-      value: albSG.securityGroupId,
+
+    const autoScalingGroup = new autoscaling.AutoScalingGroup(this, 'ASG', {
+      vpc,
+      launchTemplate,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      minCapacity: 1,
+      desiredCapacity: 2,
+      maxCapacity: 4,
     });
 
-    new cdk.CfnOutput(this, 'EC2SecurityGroupId', {
-      value: ec2SG.securityGroupId,
+  
+    autoScalingGroup.scaleOnCpuUtilization('KeepSpareCPU', {
+      targetUtilizationPercent: 50,
     });
 
-    new cdk.CfnOutput(this, 'RDSSecurityGroupId', {
-      value: rdsSG.securityGroupId,
+  
+    const alb = new elbv2.ApplicationLoadBalancer(this, 'ALB', {
+      vpc,
+      internetFacing: true,
+      securityGroup: albSG,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PUBLIC,
+      },
+    });
+
+
+    const listener = alb.addListener('Listener', {
+      port: 80,
+      open: false,
+    });
+
+    listener.addTargets('AppFleet', {
+      port: 80,
+      targets: [autoScalingGroup],
+      healthCheck: {
+        path: '/health',
+      },
+    });
+
+    new rds.DatabaseInstance(this, 'Database', {
+      engine: rds.DatabaseInstanceEngine.postgres({
+        version: rds.PostgresEngineVersion.VER_16,
+      }),
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+      },
+      securityGroups: [rdsSG],
+      instanceType: ec2.InstanceType.of(
+        ec2.InstanceClass.T3,
+        ec2.InstanceSize.MICRO
+      ),
+      allocatedStorage: 20,
+      credentials: rds.Credentials.fromGeneratedSecret('postgres'),
+      publiclyAccessible: false,
     });
   }
 }

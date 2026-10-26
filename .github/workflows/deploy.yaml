@@ -5,6 +5,14 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
 
 permissions:
   id-token: write
@@ -40,7 +48,7 @@ jobs:
           aws-region: ca-central-1
 
       - name: CDK Synth
-        run: cdk synth
+        run: cdk synth -c environment=${{ inputs.environment || 'staging' }}
 
       - name: CDK Deploy
-        run: cdk deploy --require-approval never
+        run: cdk deploy --all --require-approval never -c environment=${{ inputs.environment || 'staging' }}
